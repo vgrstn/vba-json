@@ -111,7 +111,7 @@ Debug.Print JSON.Prettify(JSON.Stringify(d))
 | JSON | VB type |
 |---|---|
 | json-object (unique non-empty keys) | `Dictionary` |
-| json-object (empty or duplicate keys) | `Collection` |
+| json-object (empty or unique set keys) | `Collection` |
 | json-array | `Variant()` array (n-dimensional) |
 | UTC string `"####-##-##T##:##:##Z"` | `Date` *(if `#Const jsonConvertUTC = True`)* |
 | Date string (recognized by `IsDate`) | `Date` |
@@ -146,7 +146,7 @@ Debug.Print JSON.Prettify(JSON.Stringify(d))
 | Dictionary keys | Not encoded | Encoded |
 | `LongLong` support | No | Yes (x64) |
 | json-array → VB | `Collection` | `Variant()` array |
-| json-object (empty keys) | Stops at first empty key | Parsed to `Collection` |
+| json-object (empty or unique set keys) | Stops at first empty key | Parsed to `Collection` |
 | Minimal-type number | No | Yes |
 | Large number | Parsed as `String` | Parsed as `Decimal` |
 | Mac support | Yes | No (Windows only) |
