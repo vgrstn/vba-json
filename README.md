@@ -110,7 +110,7 @@ Debug.Print JSON.Prettify(JSON.Stringify(d))
 
 | JSON | VB type |
 |---|---|
-| json-object (unique non-empty keys) | `Dictionary` |
+| json-object (unique keys) | `Dictionary` |
 | json-object (empty or unique set keys) | `Collection` |
 | json-array | `Variant()` array (n-dimensional) |
 | UTC string `"####-##-##T##:##:##Z"` | `Date` *(if `#Const jsonConvertUTC = True`)* |
