@@ -29,7 +29,7 @@ Fully implements the [JSON specification](https://www.json.org/json-en.html). Pu
 
 | File | Type | Description |
 |---|---|---|
-| `JSON.cls` | Class | `Stringify`, `Parse`, `Prettify`, `Simplify` — the main entry point |
+| `JSON.cls` | Class | `Stringify`, `Parse`, `Prettify`, `Simplify` — the main entry points |
 
 > **Requires** a reference to `Microsoft Scripting Runtime` (for `Dictionary`).
 
