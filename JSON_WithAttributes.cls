@@ -7,10 +7,7 @@ Attribute VB_GlobalNameSpace = False
 Attribute VB_Creatable = False
 Attribute VB_PredeclaredId = True
 Attribute VB_Exposed = False
-'@IgnoreModule UDTMemberNotUsed, HungarianNotation, VariableNotAssigned, UnassignedVariableUsage, IntegerDataType, AssignedByValParameter, ProcedureNotUsed, EmptyCaseBlock, ParameterCanBeByVal, UseMeaningfulName, MultipleDeclarations
-'@PredeclaredId
-'@Folder("Class")
-'@ModuleDescription("JSON Class.")
+Attribute VB_Description = "JSON Class."
 
 '------------------------------------------------------------------------------
 ' MIT License
@@ -346,8 +343,8 @@ End Sub
 ' Public methods
 ''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 
-'@Description "Returns the json for a VB data structure."
 Public Function Stringify(ByVal var As Variant) As String
+Attribute Stringify.VB_Description = "Returns the json for a VB data structure."
 ' Stringify is the front-end routine to start the serialization process.
 
     If VBA.IsObject(var) Or VBA.IsArray(var) Then
@@ -361,9 +358,8 @@ Public Function Stringify(ByVal var As Variant) As String
 End Function
 
 
-'@Description "Deserializes a json string to a VB data structure."
-'@Ignore AssignedByValParameter
 Public Function Parse(ByVal JSON As String) As Variant
+Attribute Parse.VB_Description = "Deserializes a json string to a VB data structure."
 ' Parse is the front-end for the deserialization process.
 
     On Error GoTo ErrorHandler
@@ -395,13 +391,13 @@ ErrorHandler:
 End Function
 
 
-'@Description "Prettifies a json string for visualisation purposes."
 Public Function Prettify( _
     ByRef JSON As String, _
     Optional ByVal indentation As String = VBA.vbTab, _
     Optional ByVal space As String = " ", _
     Optional ByVal compact As Boolean = True _
 ) As String
+Attribute Prettify.VB_Description = "Prettifies a json string for visualisation purposes."
 ' Compact = True outputs array values of the highest dimension on one line.
 
     On Error GoTo ErrorHandler
@@ -503,8 +499,8 @@ ErrorHandler:
 End Function
 
 
-'@Description "Simplifies a json string by removing whitespace."
 Public Function Simplify(ByVal JSON As String) As String
+Attribute Simplify.VB_Description = "Simplifies a json string by removing whitespace."
 ' ByVal is used explicly to create a local copy of json.
 
     ' WhiteSpace match pattern used with the Like operator.
@@ -547,7 +543,6 @@ End Function
 ' Private methods
 ''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 
-'@Description "Appends the json for a VB Data structure to a string buffer."
 Private Sub Serialize(ByRef var As Variant, ByRef builder As StringBuilder)
 ' This main decision tree is called recursively in the serialization process.
 
@@ -663,7 +658,6 @@ Private Sub Serialize(ByRef var As Variant, ByRef builder As StringBuilder)
 End Sub
 
 
-'@Description "Appends the json for a VB Dictionary to a string buffer."
 Private Sub SerializeDictionary( _
     ByRef var As Variant, _
     ByRef builder As StringBuilder _
@@ -708,7 +702,6 @@ Private Sub SerializeDictionary( _
 End Sub
 
 
-'@Description "Appends the json for a VB Collection to a string buffer."
 Private Sub SerializeCollection( _
     ByRef var As Variant, _
     ByRef builder As StringBuilder _
@@ -762,7 +755,6 @@ Private Sub SerializeCollection( _
 End Sub
 
 
-'@Description "Appends the json for a VB Array to a string buffer."
 Private Sub SerializeArray( _
     ByRef var As Variant, _
     ByRef builder As StringBuilder _
@@ -789,7 +781,6 @@ Private Sub SerializeArray( _
 End Sub
 
 
-'@Description "Appends the json for a multi-dimensional VB Array to string buffer."
 Private Sub SerializeMatrix( _
     ByRef var As Variant, _
     ByRef builder As StringBuilder, _
@@ -858,7 +849,6 @@ Private Sub SerializeMatrix( _
 End Sub
 
 
-'@Description "Encodes a Unicode/Ascii string to a printable Ascii string."
 Private Function Encode(ByRef str As String) As String
 ' Encodes a Unicode/Ascii string to a printable Ascii string.
 '
@@ -941,7 +931,6 @@ Private Function Encode(ByRef str As String) As String
 End Function
 
 
-'@Description "Deserializes a json string to a VB data stucture."
 Private Function Deserialize( _
     ByRef JSON As String, _
     ByRef index As Long _
@@ -1085,7 +1074,6 @@ ErrorHandler:
 End Function
 
 
-'@Description "Deserializes a json-object to a VB Dictionary."
 Private Function DeserializeDictionary( _
     ByRef JSON As String, _
     ByRef index As Long _
@@ -1146,7 +1134,6 @@ ErrorHandler:
 End Function
 
 
-'@Description "Deserializes a json-object to a VB Collection."
 Private Function DeserializeCollection( _
     ByRef JSON As String, _
     ByRef index As Long _
@@ -1210,7 +1197,6 @@ ErrorHandler:
 End Function
 
 
-'@Description "Deserializes a json-array to a VB Array."
 Private Function DeserializeArray( _
     ByRef JSON As String, _
     ByRef index As Long _
@@ -1261,7 +1247,6 @@ ErrorHandler:
 End Function
 
 
-'@Description "Deserializes a n-dimensional json-array to a VB Array."
 Private Function DeserializeMatrix( _
     ByRef JSON As String, _
     ByRef index As Long, _
@@ -1375,7 +1360,6 @@ ErrorHandler:
 End Function
 
 
-'@Description "Determines whether the n-dimensional json-array is jagged or not."
 Private Function IsJaggedArray(ByRef Lengths() As Variant, ByRef NDim As Long) As Boolean
 ' For an array all array lengths at a certain depth need to be identical.
 
@@ -1397,7 +1381,6 @@ Private Function IsJaggedArray(ByRef Lengths() As Variant, ByRef NDim As Long) A
 End Function
 
 
-'@Description "Redimensions an one-dimensional array to a multi-dimensional array."
 Private Function RedimensionArray( _
     ByRef Items() As Variant, _
     ByRef Lengths() As Variant, _
@@ -1441,7 +1424,6 @@ Private Function RedimensionArray( _
 End Function
 
 
-'@Description "Decodes a printable Ascii string to an a Unicode string."
 Private Function Decode(ByRef JSON As String) As String
 
     ' Lookup table for character decoding.
@@ -1490,7 +1472,6 @@ Private Function Decode(ByRef JSON As String) As String
 End Function
 
 
-'@Description "Matches a string at the current position and advances the index."
 Private Function MatchString(ByRef JSON As String, ByRef index As Long) As String
 ' Mid$(json, Index, 1) = """"
 
@@ -1513,7 +1494,6 @@ Private Function MatchString(ByRef JSON As String, ByRef index As Long) As Strin
 End Function
 
 
-'@Description "Matches a value at the current position and advances the index."
 Private Function MatchValue(ByRef JSON As String, ByRef index As Long) As String
 
     Const StructuralCharacters As String = "{}[],:"
@@ -1534,7 +1514,6 @@ Private Function MatchValue(ByRef JSON As String, ByRef index As Long) As String
 End Function
 
 
-'@Description "Determines whether a string is a large Excel number or not."
 Private Function IsExcelLargeNumberString(ByRef var As Variant) As Boolean
 ' When you type a number that contains more than 15 digits in a cell in Excel,
 ' any digits past the 15th place are changed to zeros. In order to prevent data
@@ -1589,7 +1568,6 @@ Private Function IsExcelLargeNumberString(ByRef var As Variant) As Boolean
 End Function
 
 
-'@Description "Raises an error and prints information about the parse error."
 Private Sub RaiseParseError( _
     ByVal error As JSONERROR, _
     ByRef JSON As String, _
@@ -1630,7 +1608,6 @@ Private Sub RaiseParseError( _
 End Sub
 
 
-'@Description "Returns the description for an error."
 Private Function ErrorDescription( _
     ByVal error As JSONERROR _
 ) As String
@@ -1681,7 +1658,6 @@ End Function
 ' buffer is used to prevent possible performance degradation due to high volume
 ' string allocations which may happen during the serialization process.
 
-'@Description "Appends a string to the buffered string."
 Private Sub Append(ByRef builder As StringBuilder, ByRef str As String)
 ' The choice was made to grow the buffer exponentially rather than linearly.
 
@@ -1703,7 +1679,6 @@ Private Sub Append(ByRef builder As StringBuilder, ByRef str As String)
 End Sub
 
 
-'@Description "Adjust the head space of the buffered string."
 Private Sub Adjust(ByRef builder As StringBuilder, ByVal amount As Long)
 
     builder.HeadSpace = builder.HeadSpace + amount
@@ -1717,7 +1692,6 @@ Private Sub Adjust(ByRef builder As StringBuilder, ByVal amount As Long)
 End Sub
 
 
-'@Description "Shortens the buffered string by an amount of characters."
 Private Sub Shorten(ByRef builder As StringBuilder, Optional ByVal amount As Long = 1)
 
     If amount < builder.Count Then
@@ -1729,7 +1703,6 @@ Private Sub Shorten(ByRef builder As StringBuilder, Optional ByVal amount As Lon
 End Sub
 
 
-'@Description "Flushes the buffered string."
 Private Function Flush(ByRef builder As StringBuilder) As String
 ' The string buffer keeps its current size.
 
@@ -1744,11 +1717,9 @@ End Function
 ' Private methods - Date conversion
 ''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 
-'@Description "Converts a local time to the corresponding GMT."
 Private Function ConvertLocalTimeToGMT(Optional ByVal LocalTime As Variant) As Date
 
     Dim TZInfo As TimeZoneInformation, TZStatus As TIMEZONESTATUS
-    '@Ignore AssignmentNotUsed
     TZStatus = GetTimeZoneInformation(TZInfo)
 
     If VBA.IsMissing(LocalTime) Then
@@ -1778,12 +1749,9 @@ Private Function ConvertLocalTimeToGMT(Optional ByVal LocalTime As Variant) As D
 End Function
 
 
-'@Description "Converts a GMT to the corresponding local time."
 Private Function ConvertGMTToLocalTime(ByVal GMT As Date) As Date
 
-    '@Ignore VariableNotUsed
     Dim TZInfo As TimeZoneInformation, TZStatus As TIMEZONESTATUS
-    '@Ignore AssignmentNotUsed
     TZStatus = GetTimeZoneInformation(TZInfo)
 
     With TZInfo
@@ -1802,7 +1770,6 @@ Private Function ConvertGMTToLocalTime(ByVal GMT As Date) As Date
 End Function
 
 
-'@Description "Converts a local serial time to the corresponding UTC."
 Private Function ConvertLocalTimeToUTC( _
     ByVal LocalTime As Variant, _
     Optional ByVal Delimiter As Boolean = True _
@@ -1829,7 +1796,6 @@ Private Function ConvertLocalTimeToUTC( _
 End Function
 
 
-'@Description "Converts a UTC to the corresponding local serial time."
 Private Function ConvertUTCToLocalTime(ByVal UTC As String) As Date
 ' For formats see https://en.wikipedia.org/wiki/ISO_8601
 
@@ -1856,7 +1822,6 @@ Private Function ConvertUTCToLocalTime(ByVal UTC As String) As Date
 End Function
 
 
-'@Description "Converts a system time to the corresponding serial time."
 Private Function ConvertSystemTimeToSerialTime(ByRef SystemTime As SystemTime) As Date
 ' Serial time is the time as implemented with the VB Date type.
 
@@ -1869,8 +1834,6 @@ Private Function ConvertSystemTimeToSerialTime(ByRef SystemTime As SystemTime) A
 End Function
 
 
-'@Description "Converts a serial time to the corresponding system time."
-'@Ignore NonReturningFunction
 Private Function ConvertDateToSystemTime(ByVal serialTime As Date) As SystemTime
 
     With ConvertDateToSystemTime
@@ -1888,7 +1851,6 @@ Private Function ConvertDateToSystemTime(ByVal serialTime As Date) As SystemTime
 End Function
 
 
-'@Description "Determines whether a date falls within the daylight saving period or not."
 Private Function DST(ByVal serialDate As Date) As TIMEZONESTATUS
 
     Dim TZInfo As TimeZoneInformation
@@ -1925,7 +1887,6 @@ Private Function DST(ByVal serialDate As Date) As TIMEZONESTATUS
 End Function
 
 
-'@Description "Returns the date of the last weekday in the month specified by a date."
 Private Function LastDayOfWeekOfMonth( _
     ByVal DayOfWeek As VbDayOfWeek, _
     ByVal serialTime As Date _
@@ -1946,7 +1907,6 @@ End Function
 ' Private methods - Utility
 ''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 
-'@Description "Determine the locale for the decimal point."
 Private Function LocaleDecimalPoint() As Boolean
 
     ' Quick way to establish the locale for the decimal point without API.
@@ -1965,7 +1925,6 @@ Private Function LocaleDecimalPoint() As Boolean
 End Function
 
 
-'@Description "Returns the number of dimensions of an array."
 Private Function ArrDims(ByRef arr As Variant) As Long
 ' Returns 0 for an empty array.
 ' LBound raises on out-of-range n — used as the loop exit condition.
@@ -1986,7 +1945,6 @@ End Function
 
 
 #If API Then
-'@Description "Returns an array containing the keys of all the items in a VB Collection."
 Private Function CollKeys(ByVal coll As Collection) As String()
 ' Returns an empty string array for an empty Collection.
 
@@ -2013,7 +1971,6 @@ Private Function CollKeys(ByVal coll As Collection) As String()
 
 End Function
 #Else
-'@Description "Initializes the Variant ByRef construct."
 Private Sub InitializeVarByRef()
 
     VarByRef.vt = VarPtr(VarByRef.ref)
@@ -2022,7 +1979,6 @@ Private Sub InitializeVarByRef()
 End Sub
 
 
-'@Description "Returns an array containing the keys of all the items in a VB Collection."
 Private Function CollKeys(ByVal coll As Collection, ByRef vt As Variant) As String()
 ' Returns an empty string array for an empty Collection.
 

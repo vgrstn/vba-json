@@ -18,7 +18,7 @@ Fully implements the [JSON specification](https://www.json.org/json-en.html). Pu
 - **Minimal-type number parsing** — json-numbers become `Long`, `LongLong` (x64), `Double`, or `Decimal`, whichever fits
 - **UTC date-time** — `VB Date` values with both date and time convert to `"yyyy-mm-ddThh:mm:ssZ"` and back (configurable)
 - **Prettify / Simplify** — format json for display or strip whitespace for transport
-- **Configurable** — six `#Const` compiler directives control UTC conversion, Collection keys, Excel large numbers, quoted/unquoted keys
+- **Configurable** — seven `#Const` compiler directives control UTC conversion, date parsing, Collection keys, Excel large numbers, quoted/unquoted keys
 - **High-performance string buffer** — `StringBuilder` UDT with exponential growth prevents O(n²) string concatenation
 - x86 / x64 compatible via `LongPtr` and `#If Win64`
 - Pure VBA, zero dependencies, Rubberduck-friendly annotations
@@ -27,9 +27,12 @@ Fully implements the [JSON specification](https://www.json.org/json-en.html). Pu
 
 ## 📁 Files
 
-| File | Type | Description |
-|---|---|---|
-| `JSON.cls` | Class | `Stringify`, `Parse`, `Prettify`, `Simplify` — the main entry points |
+| File | Description |
+|---|---|
+| `JSON.cls` | Source file with [Rubberduck](https://rubberduckvba.com/) annotations (`'@Description`, `'@PredeclaredId`, `'@IgnoreModule`) |
+| `JSON_WithAttributes.cls` | Ready-to-import version with VB attributes baked in — no Rubberduck required |
+
+Both files are identical in behaviour. Import `JSON_WithAttributes.cls` if you are not using Rubberduck.
 
 > **Requires** a reference to `Microsoft Scripting Runtime` (for `Dictionary`).
 
@@ -100,7 +103,7 @@ Debug.Print JSON.Prettify(JSON.Stringify(d))
 | Array | json-array (any number of dimensions) |
 | `Date` (date + time, ≥ 1) | `"yyyy-mm-ddThh:mm:ssZ"` UTC string *(if `#Const jsonConvertUTC = True`)* |
 | `Date` (date only, or < 1) | VB default string representation |
-| `String` | json-string (Unicode/special chars escaped) |
+| `String` | json-string (Unicode/special chars escaped; `/` is **not** escaped — RFC 4627 §2.5 permits but does not require it) |
 | `Long`, `Integer`, `Byte`, `LongLong` | json-number |
 | `Single`, `Double`, `Currency`, `Decimal` | json-number |
 | `Boolean` | `true` / `false` |
@@ -110,11 +113,11 @@ Debug.Print JSON.Prettify(JSON.Stringify(d))
 
 | JSON | VB type |
 |---|---|
-| json-object (unique keys) | `Dictionary` |
+| json-object (unique non-empty keys) | `Dictionary` |
 | json-object (empty or unique set keys) | `Collection` |
 | json-array | `Variant()` array (n-dimensional) |
 | UTC string `"####-##-##T##:##:##Z"` | `Date` *(if `#Const jsonConvertUTC = True`)* |
-| Date string (recognized by `IsDate`) | `Date` |
+| Other date string (recognized by `VBA.IsDate`) | `Date` *(only if `#Const jsonConvertDate = True`)* |
 | json-string | `String` |
 | integer json-number | `Long` → `LongLong` (x64) → `Decimal` |
 | decimal json-number | `Double` → `Decimal` |
@@ -129,10 +132,22 @@ Debug.Print JSON.Prettify(JSON.Stringify(d))
 |---|---|---|
 | `#Const API` | `False` | Use Windows API (`SysReAllocString`) or faster Variant ByRef approach to read Collection keys |
 | `#Const jsonConvertUTC` | `True` | Convert `VB Date` (date + time) to/from UTC ISO-8601 string |
+| `#Const jsonConvertDate` | `False` | Convert any json-string recognised by `VBA.IsDate` to a `VB Date` on parsing |
 | `#Const jsonConvertCollectionKeys` | `True` | Include Collection keys in the serialized json-object |
 | `#Const jsonConvertExcelLargeNumber` | `False` | Treat strings/numbers with more than 15 digits as Excel large numbers |
 | `#Const jsonSerializeQuotedKeys` | `True` | Wrap object keys in quotes (standard JSON) |
 | `#Const jsonDeserializeUnquotedKeys` | `False` | Also accept unquoted keys when parsing |
+
+### `jsonConvertDate` × `jsonConvertUTC` — string deserialization behaviour
+
+| `jsonConvertDate` | `jsonConvertUTC` | Behaviour |
+|---|---|---|
+| `False` | `False` | All json-strings are kept as a VB `String`. |
+| `False` | `True` | Only an exact UTC format (`####-##-##T##:##:##Z`) is converted to a VB `Date`. All other json-strings are kept as a VB `String`. |
+| `True` | `False` | Any json-string recognised by `VBA.IsDate` is converted to a VB `Date`. All others kept as a VB `String`. |
+| `True` | `True` | Any json-string recognised by `VBA.IsDate` is converted to a VB `Date`. If not, an exact UTC format is converted to a VB `Date`. All others kept as a VB `String`. |
+
+> **Why `jsonConvertDate` defaults to `False`:** `VBA.IsDate` is locale-dependent. A string like `"12/01/2025"` is silently converted to a `Date` on a US locale but kept as a `String` on a European locale. Keeping it `False` ensures consistent cross-locale behaviour and prevents accidental date conversion of strings like API tokens or version numbers that happen to match a date pattern.
 
 ---
 
@@ -155,11 +170,29 @@ Debug.Print JSON.Prettify(JSON.Stringify(d))
 
 ## 🧠 Implementation notes
 
-- **Predeclared class** — `Attribute VB_PredeclaredId = True` creates a module-level default instance; methods are called directly without `New`.
-- **StringBuilder** — serialization uses a pre-allocated string buffer (`StringBuilder` UDT) that doubles in size as needed, avoiding repeated string concatenation.
-- **Multi-dimensional arrays** — serialization uses `For Each` which enumerates in column-major order. Delimiters between elements (`,`, `],[`, `]],[[`, …) are derived from the array strides. Deserialization uses a 1-D buffer and a `SafeArrayCreate` pointer swap to redimension it in-place.
-- **Collection keys** — read from the Collection's internal linked list via `CopyMemory` (API mode) or a Variant ByRef memory construct (default, ~5× faster).
-- **UTC DST** — `DST()` calls `GetTimeZoneInformationForYear` (Vista+) to determine whether a given date falls in daylight saving time, using the machine's own timezone rules for any historical year. No hardcoded regional rules.
+### Predeclared class
+`Attribute VB_PredeclaredId = True` creates a module-level default instance; methods are called directly without `New`.
+
+### StringBuilder
+Serialization uses a pre-allocated string buffer (`StringBuilder` UDT) that doubles in size as needed, avoiding repeated string concatenation.
+
+### Multi-dimensional arrays
+Serialization uses `For Each` which enumerates in column-major order. Delimiters between elements (`,`, `],[`, `]],[[`, …) are derived from the array strides so no per-element branching is needed. Deserialization uses a 1-D buffer and a `SafeArrayCreate` pointer swap to redimension it in-place without copying the data.
+
+### Collection keys
+Collection keys are read from the Collection's internal doubly-linked list via `CopyMemory` + `SysReAllocString` (API mode) or a Variant ByRef memory construct (default, `#Const API = False`). The ByRef construct temporarily repoints a Variant's data address, letting VBA read any memory location without a COM-style BSTR allocation. This is approximately 5× faster than the API approach.
+
+### Asymmetric `/` handling in Encode / Decode
+RFC 4627 §2.5 permits but does not require escaping `/` as `\/`. `Encode` (serialization) does **not** emit `\/` — it is unnecessary and adds noise. `Decode` (deserialization) **does** accept `\/` — third-party producers (e.g. some .NET serializers) emit it, and the parser must remain interoperable. The lookup tables in the two functions differ by exactly this entry.
+
+### UTC and DST
+`DST()` calls `GetTimeZoneInformationForYear` (Vista+) to determine whether a given date falls in daylight saving time, using the machine's own timezone rules for any historical year. No hardcoded regional rules.
+
+### `MatchValue` and structural characters
+`MatchValue` scans for the first character in `"{}[],:"` to delimit a number or literal token. The double-quote `"` is intentionally absent: `MatchValue` is never called when the current character is `"` — that path dispatches to `MatchString` instead. Including `"` would cause spurious early termination on pathological inputs like an unquoted key immediately followed by a string value.
+
+### `ArrDims`
+Uses `LBound(arr, n)` in a loop with `On Error` to count dimensions. VBA raises on an out-of-range dimension index, making the error the natural loop-exit condition. Returns `0` for an empty (unallocated) array.
 
 ---
 
