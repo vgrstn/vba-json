@@ -161,7 +161,7 @@ Debug.Print JSON.Prettify(JSON.Stringify(d))
 | Dictionary keys | Not encoded | Encoded |
 | `LongLong` support | No | Yes (x64) |
 | json-array → VB | `Collection` | `Variant()` array |
-| json-object (empty or unique set keys) | Stops at first empty key | Parsed to `Collection` |
+| json-object (empty keys) | Stops at first empty key | Parsed to `Collection` |
 | Minimal-type number | No | Yes |
 | Large number | Parsed as `String` | Parsed as `Decimal` |
 | Mac support | Yes | No (Windows only) |
