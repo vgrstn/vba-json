@@ -99,7 +99,7 @@ Debug.Print JSON.Prettify(JSON.Stringify(d))
 | VB type | JSON |
 |---|---|
 | `Dictionary` | json-object (all keys set and unique) |
-| `Collection` | json-object (set keys unique; unset keys become `""`) |
+| `Collection` | json-object (unset keys become `""`) |
 | Array | json-array (any number of dimensions) |
 | `Date` (date + time, ≥ 1) | `"yyyy-mm-ddThh:mm:ssZ"` UTC string *(if `#Const jsonConvertUTC = True`)* |
 | `Date` (date only, or < 1) | VB default string representation |
@@ -114,7 +114,7 @@ Debug.Print JSON.Prettify(JSON.Stringify(d))
 | JSON | VB type |
 |---|---|
 | json-object (unique non-empty keys) | `Dictionary` |
-| json-object (empty or unique set keys) | `Collection` |
+| json-object (unique keys or empty keys) | `Collection` |
 | json-array | `Variant()` array (n-dimensional) |
 | UTC string `"####-##-##T##:##:##Z"` | `Date` *(if `#Const jsonConvertUTC = True`)* |
 | Other date string (recognized by `VBA.IsDate`) | `Date` *(only if `#Const jsonConvertDate = True`)* |
