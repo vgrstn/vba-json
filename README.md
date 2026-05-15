@@ -4,7 +4,7 @@
 ![Architecture](https://img.shields.io/badge/Architecture-x86%20%7C%20x64-lightgrey)
 ![Rubberduck](https://img.shields.io/badge/Rubberduck-Ready-orange)
 
-VBA predeclared Class for JSON serialization and deserialization — converts any VB data structure to and from JSON, including multi-dimensional arrays, Collections with keys, and UTC date-time strings.
+VBA predeclared Class for JSON — converts any VB data structure to and from JSON, including multi-dimensional arrays, Collections with keys, and UTC date-time strings.
 
 Fully implements the [JSON specification](https://www.json.org/json-en.html). Pure VBA, zero dependencies, x86/x64 compatible.
 
