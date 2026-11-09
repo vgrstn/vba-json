@@ -43,7 +43,7 @@ Option Explicit
 ' E-mail: vincent@vangeerestein.com
 ' Description: JSON Module
 ' Add-in: RubberDuck (https://rubberduckvba.com/)
-' Version: 2025.09.09
+' Version: 2026.11.09
 '
 ' JSON implements a sophisticated json generator and parser capable of handling
 ' multi-dimensional arrays and serializing a VB Collection including its keys.
@@ -130,7 +130,11 @@ Option Explicit
 ' Convert VB Collection Keys and include in json-object or ignore keys.
 #Const jsonConvertCollectionKeys = True
 
-' Convert a large number (> 15 digits) to a VB string and vice versa.
+' Convert a large number (> 15 digits) to a VB string and vice versa. Meant for
+' Excel: Excel stores a number as a Double with 15 significant digits and has
+' no LongLong, so every json-number with more than 15 digits becomes a string,
+' also one that fits a LongLong. Thousands separators are removed from a
+' large-number string when it is serialized.
 #Const jsonConvertExcelLargeNumber = False
 
 ' Serialize the keys with quotes (default).
@@ -158,6 +162,11 @@ Option Explicit
 ' True             True            Any json-string recognised by VBA.IsDate is
 '                                  converted to a VB Date. If not, an exact UTC format
 '                                  is converted to a VB Date. All others as a VB String.
+
+' Stringify raises an error for VB data without a json form (default), or puts
+' the error message in the json in place of the value and prints it to the
+' Immediate window (the json is then invalid).
+#Const jsonRaiseDataErrors = True
 
 ''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 ' Private API declarations
@@ -270,6 +279,7 @@ Private Enum JSONERROR
     jsErrorInvalidNumber
     jsErrorInvalidCharacter
     jsErrorExtraCharacter
+    jsErrorEmptyDimension
 End Enum
 
 ' StringBuffer is used to prevent performance degradation due to a high volume string allocations.
@@ -323,6 +333,19 @@ Private VarByRef As CONSTRUCT
 ' The locale decimal point (Empty for not set, True for "." or False for ",").
 Private DecimalPoint As Variant
 
+' A Dictionary kept alive for the lifetime of the class: while no Dictionary
+' exists, New Dictionary takes about 470 µs instead of 5 µs (measured), which
+' would be paid for every json-object or matrix parsed.
+Private KeepDictionaryAlive As Dictionary
+
+' Lookup tables for Encode, see InitializeEncodeTables.
+Private EncodeEscapes(0 To 127) As Byte
+Private HexDigits(0 To 15) As Byte
+
+' Lookup tables for Decode, see InitializeDecodeTables.
+Private DecodeEscapes(0 To 127) As Byte
+Private HexValues(0 To 127) As Byte
+
 
 ''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 ' Class methods
@@ -331,6 +354,9 @@ Private DecimalPoint As Variant
 Private Sub Class_Initialize()
 
     DecimalPoint = LocaleDecimalPoint
+    Set KeepDictionaryAlive = New Dictionary
+    InitializeEncodeTables
+    InitializeDecodeTables
 
 #If API = False Then
     InitializeVarByRef
@@ -346,43 +372,46 @@ End Sub
 Public Function Stringify(ByVal var As Variant) As String
 Attribute Stringify.VB_Description = "Returns the json for a VB data structure."
 ' Stringify is the front-end routine to start the serialization process.
+' VB data without a json form raises an error, see DataError.
 
+    Dim builder As StringBuilder
     If VBA.IsObject(var) Or VBA.IsArray(var) Then
-        Dim builder As StringBuilder
         Serialize var, builder
-        Stringify = Flush(builder)
     Else
-        Stringify = ErrorDescription(jsErrorInvalidData)
+        DataError builder, jsErrorInvalidData, VBA.TypeName(var)
     End If
+    Stringify = Flush(builder)
 
 End Function
 
 
 Public Function Parse(ByVal JSON As String) As Variant
 Attribute Parse.VB_Description = "Deserializes a json string to a VB data structure."
-' Parse is the front-end for the deserialization process.
+' Parse is the front-end for the deserialization process. The parser skips the
+' whitespace between the tokens itself, so the positions in a parse error are
+' those of the json as given. Any json-value is allowed at the top level.
 
     On Error GoTo ErrorHandler
 
-    ' Remove the whitespace in the local ByVal copy of Json.
-    JSON = Simplify(JSON)
-
     ' Initiate the deserialization process.
-    Dim index As Long: index = 1
-    If Left$(JSON, 1) & Right$(JSON, index) = "{}" Then
+    Dim index As Long: index = SkipWhitespace(JSON, 1)
+    Dim IsJsonObject As Boolean: IsJsonObject = (Mid$(JSON, index, 1) = "{")
+    If IsJsonObject Then
         Set Parse = Deserialize(JSON, index)
     Else
         Parse = Deserialize(JSON, index)
     End If
 
+    ' Only whitespace may follow the json-value.
+    index = SkipWhitespace(JSON, index)
     If index <= Len(JSON) Then
         RaiseParseError jsErrorExtraCharacter, JSON, index
     End If
     Exit Function
 
 ErrorHandler:
-    ' Tidy up to prevent cascading errors.
-    If Left$(JSON, 1) & Right$(JSON, index) = "{}" Then
+    ' Tidy up to prevent cascading errors: Nothing for a json-object, so that Set works.
+    If IsJsonObject Then
         Set Parse = Nothing
     Else
         Parse = Empty
@@ -417,56 +446,47 @@ Attribute Prettify.VB_Description = "Prettifies a json string for visualisation 
         Dim Char As String: Char = Mid$(JSON, i, 1)
         Select Case Char
         Case """"
-            builder.Count = builder.Count + 1
-            Mid$(builder.Buffer, builder.Count) = """"
-            Append builder, MatchString(JSON, i)
-            builder.Count = builder.Count + 1
-            Mid$(builder.Buffer, builder.Count) = """"
+            ' Copy the json-string as it is, escapes included; MatchString finds its end.
+            Dim Start As Long: Start = i
+            MatchString JSON, i
+            Append builder, Mid$(JSON, Start, i - Start)
             i = i - 1
         Case "{"
             builder.Count = builder.Count + 1
             Mid$(builder.Buffer, builder.Count) = Char
             If MaxDepth = False Then
                 Depth = Depth + 1
-                builder.Count = builder.Count + 1
-                Mid$(builder.Buffer, builder.Count) = VBA.vbCrLf
-                Append builder, String$(Depth, indentation)
+                Append builder, LineBreak(Depth, indentation)
             End If
         Case "}"
             If MaxDepth = False Then
                 Depth = Depth - 1
-                builder.Count = builder.Count + 1
-                Mid$(builder.Buffer, builder.Count) = VBA.vbCrLf
-                Append builder, String$(Depth, indentation)
+                Append builder, LineBreak(Depth, indentation)
             End If
             builder.Count = builder.Count + 1
             Mid$(builder.Buffer, builder.Count) = Char
         Case "["
             If compact Then
                 ' Determine whether this is the maximum array depth.
-                Dim match As Long: match = VBA.InStr(i + 1, JSON, "[")
+                Dim match As Long: match = InStr(i + 1, JSON, "[")
                 If match = 0 Then
                     MaxDepth = True
                 Else
-                    MaxDepth = match > VBA.InStr(i + 1, JSON, "]")
+                    MaxDepth = match > InStr(i + 1, JSON, "]")
                 End If
             End If
             builder.Count = builder.Count + 1
             Mid$(builder.Buffer, builder.Count) = Char
             If MaxDepth = False Then
                 Depth = Depth + 1
-                builder.Count = builder.Count + 1
-                Mid$(builder.Buffer, builder.Count) = VBA.vbCrLf
-                Append builder, String$(Depth, indentation)
+                Append builder, LineBreak(Depth, indentation)
             End If
         Case "]"
             If MaxDepth Then
                 MaxDepth = False
             Else
                 Depth = Depth - 1
-                builder.Count = builder.Count + 1
-                Mid$(builder.Buffer, builder.Count) = VBA.vbCrLf
-                Append builder, String$(Depth, indentation)
+                Append builder, LineBreak(Depth, indentation)
             End If
             builder.Count = builder.Count + 1
             Mid$(builder.Buffer, builder.Count) = Char
@@ -474,16 +494,12 @@ Attribute Prettify.VB_Description = "Prettifies a json string for visualisation 
             builder.Count = builder.Count + 1
             Mid$(builder.Buffer, builder.Count) = Char
             If MaxDepth Then
-                builder.Count = builder.Count + 1
-                Mid$(builder.Buffer, builder.Count) = space
+                Append builder, space
             Else
-                builder.Count = builder.Count + 1
-                Mid$(builder.Buffer, builder.Count) = VBA.vbCrLf
-                Append builder, String$(Depth, indentation)
+                Append builder, LineBreak(Depth, indentation)
             End If
         Case ":"
-            Mid$(builder.Buffer, builder.Count + 1) = Char & space
-            builder.Count = builder.Count + 2
+            Append builder, Char & space
         Case Else
             ' json-numbers and json-literals end up here.
             Append builder, Char
@@ -495,6 +511,15 @@ Attribute Prettify.VB_Description = "Prettifies a json string for visualisation 
 ErrorHandler:
     ' Parsing the json input will pinpoint the error.
     Debug.Print Me.Parse(JSON)
+
+End Function
+
+
+Private Function LineBreak(ByVal level As Long, ByRef indentation As String) As String
+Attribute LineBreak.VB_Description = "Returns a line break and the indentation for a level."
+' The indentation may be any string: it is repeated level times.
+
+    LineBreak = VBA.vbCrLf & VBA.Replace(space$(level), " ", indentation)
 
 End Function
 
@@ -544,18 +569,16 @@ End Function
 ''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 
 Private Sub Serialize(ByRef var As Variant, ByRef builder As StringBuilder)
+Attribute Serialize.VB_Description = "Appends the json for a VB Data structure to a string buffer."
 ' This main decision tree is called recursively in the serialization process.
-
-    ' Headspace for adding structural characters.
-    Const HeadSpace As Long = 2
+' A string or a date needs no headspace of its own: Append always leaves 2
+' characters free, for the closing """" and the next structural character.
 
     ' At this point there is always at least 1 headspace left!
     Select Case VBA.VarType(var)
     Case VBA.vbString
         builder.Count = builder.Count + 1
         Mid(builder.Buffer, builder.Count) = """"
-        ' Headspace for adding structural characters.
-        Adjust builder, HeadSpace
 #If jsonConvertExcelLargeNumber Then
         If IsExcelLargeNumberString(var) Then
             ' Convert an Excel Large Number String to a json-string.
@@ -576,7 +599,6 @@ Private Sub Serialize(ByRef var As Variant, ByRef builder As StringBuilder)
 #End If
         builder.Count = builder.Count + 1
         Mid(builder.Buffer, builder.Count) = """"
-        Adjust builder, -HeadSpace
     Case VBA.vbInteger, VBA.vbLong, VBA.vbByte, vbLongPtr
         ' Convert a VB number to a json-number.
         Append builder, CStr(var)
@@ -588,26 +610,26 @@ Private Sub Serialize(ByRef var As Variant, ByRef builder As StringBuilder)
             Append builder, VBA.Replace(var, ",", ".", 1, 1)
         End If
     Case VBA.vbObject
-        Select Case VBA.TypeName(var)
-        Case "Dictionary"
+        ' TypeOf rather than TypeName: TypeName of a Scripting.Dictionary takes
+        ' about 500 µs per call, TypeOf takes no measurable time.
+        If TypeOf var Is Dictionary Then
             ' Serialize a VB Dictionary to a json-object.
             If var.Count = 0 Then
                 Append builder, "{}"
             Else
                 SerializeDictionary var, builder
             End If
-        Case "Collection"
+        ElseIf TypeOf var Is Collection Then
             ' Serialize a VB Collection to a json-object.
             If var.Count = 0 Then
                 Append builder, "{}"
             Else
                 SerializeCollection var, builder
             End If
-        Case Else
-            ' Serialize other VB objects.
-            Append builder, "{" & VBA.TypeName(var) & "}"
-            Debug.Print ErrorDescription(jsErrorInvalidObject) & ": " & VBA.TypeName(var)
-        End Select
+        Else
+            ' Other VB objects can't be serialized.
+            DataError builder, jsErrorInvalidObject, VBA.TypeName(var)
+        End If
     Case Is >= VBA.vbArray
         ' Serialize the VB Array to a json-array.
         Dim NDims As Long: NDims = ArrDims(var)
@@ -630,9 +652,6 @@ Private Sub Serialize(ByRef var As Variant, ByRef builder As StringBuilder)
     Case VBA.vbDate
         builder.Count = builder.Count + 1
         Mid(builder.Buffer, builder.Count) = """"
-        ' Headspace for adding structural characters.
-        Adjust builder, HeadSpace
-        ' Next Append will check for the extra headspace.
 #If jsonConvertUTC Then
         If var <> VBA.CLng(var) And var >= 1 Then
             ' Convert a VB Date to a UTC format if both the date and the time are set.
@@ -647,12 +666,9 @@ Private Sub Serialize(ByRef var As Variant, ByRef builder As StringBuilder)
 #End If
         builder.Count = builder.Count + 1
         Mid(builder.Buffer, builder.Count) = """"
-        Adjust builder, -HeadSpace
     Case Else
-        ' Serialization for other VB types.
-        ' Not implemented for vbUserDefinedType, vbError, vbDataObject and vbEmpty.
-        Append builder, VBA.TypeName(var)
-        Debug.Print ErrorDescription(jsErrorInvalidType) & ": " & VBA.TypeName(var)
+        ' Other VB types can't be serialized: vbUserDefinedType, vbError and vbDataObject.
+        DataError builder, jsErrorInvalidType, VBA.TypeName(var)
     End Select
 
 End Sub
@@ -662,6 +678,7 @@ Private Sub SerializeDictionary( _
     ByRef var As Variant, _
     ByRef builder As StringBuilder _
 )
+Attribute SerializeDictionary.VB_Description = "Appends the json for a VB Dictionary to a string buffer."
 ' A Dictionary key is usually an integer or a string, but it can be anything
 ' except an array. The keys are unique and one key could be an empty string.
 ' Here the keys are converted to strings, which will raise an error if this
@@ -685,7 +702,7 @@ Private Sub SerializeDictionary( _
         Mid(builder.Buffer, builder.Count + 1) = """:"
         builder.Count = builder.Count + 2
 #Else
-        Append builder, Encode(CStr(Keys(i)))
+        AppendUnquotedKey builder, CStr(Keys(i))
         builder.Count = builder.Count + 1
         Mid$(builder.Buffer, builder.Count) = ":"
 #End If
@@ -706,6 +723,7 @@ Private Sub SerializeCollection( _
     ByRef var As Variant, _
     ByRef builder As StringBuilder _
 )
+Attribute SerializeCollection.VB_Description = "Appends the json for a VB Collection to a string buffer."
 ' A Collection key is always a string. For a Collection not all keys need to be
 ' set. For json any unset key is converted to an empty string.
 
@@ -730,10 +748,16 @@ Private Sub SerializeCollection( _
         builder.Count = builder.Count + 1
         Mid(builder.Buffer, builder.Count) = """"
 #End If
+#If jsonSerializeQuotedKeys Then
 #If jsonConvertCollectionKeys Then
         If Len(Keys(i)) <> 0 Then
             Append builder, Encode(Keys(i))
         End If
+#End If
+#ElseIf jsonConvertCollectionKeys Then
+        AppendUnquotedKey builder, Keys(i)
+#Else
+        AppendUnquotedKey builder, vbNullString
 #End If
 #If jsonSerializeQuotedKeys Then
         Mid(builder.Buffer, builder.Count + 1) = """:"
@@ -759,6 +783,7 @@ Private Sub SerializeArray( _
     ByRef var As Variant, _
     ByRef builder As StringBuilder _
 )
+Attribute SerializeArray.VB_Description = "Appends the json for a VB Array to a string buffer."
 
     ' Headspace for adding structural characters.
     Const HeadSpace As Long = 2
@@ -786,6 +811,7 @@ Private Sub SerializeMatrix( _
     ByRef builder As StringBuilder, _
     ByVal NDims As Long _
 )
+Attribute SerializeMatrix.VB_Description = "Appends the json for a multi-dimensional VB Array to string buffer."
 ' The For Each loop enumerates the elements of any multi-dimensional array in a
 ' column-major order which corresponds to the way in which the array elements
 ' are physically stored in memory. Although the enumeration of the elements is
@@ -799,6 +825,16 @@ Private Sub SerializeMatrix( _
 ' comparing the moduli of the sequence index with the strides of the array.
 ' https://en.wikipedia.org/wiki/Row-_and_column-major_order for strides.
 
+    ' An array with an empty dimension has no json form: the shape would be lost.
+    ' ReDim can't make such an array, but the Windows API or a COM component can.
+    Dim n As Long
+    For n = 1 To NDims
+        If UBound(var, n) < LBound(var, n) Then
+            DataError builder, jsErrorEmptyDimension, "dimension " & n
+            Exit Sub
+        End If
+    Next
+
     ' Headspace for adding structural characters.
     Dim HeadSpace As Long: HeadSpace = 2 * NDims
     Adjust builder, HeadSpace
@@ -811,7 +847,6 @@ Private Sub SerializeMatrix( _
             Delimiters(1) = ","
             Initialized = 1
         End If
-        Dim n As Long
         For n = Initialized + 1 To NDims
             Delimiters(n) = "]" & Delimiters(n - 1) & "["
         Next
@@ -849,84 +884,123 @@ Private Sub SerializeMatrix( _
 End Sub
 
 
-Private Function Encode(ByRef str As String) As String
-' Encodes a Unicode/Ascii string to a printable Ascii string.
-'
-' Buffering printable ascii characters achieves a significant performance
-' improvement over the straightforward one-by-one character approach.
-'
-' Best case timer ratio's for 100% printable ascii characters
-' n         1       10      100    1000
-' r      0.98      3.5     16.1    28.4
-'
-' Worst case timer ratio's for 100% non-printable ascii characters
-' n         1       10      100    1000
-' r      0.77     0.90     0.95    0.97
-'
-' n = length of input string
-' r = ratio of timer(one-by-one) / timer(improved)
+#If jsonDeserializeUnquotedKeys Or Not jsonSerializeQuotedKeys Then
+Private Function IsSimpleKey(ByRef key As String) As Boolean
+Attribute IsSimpleKey.VB_Description = "Determines whether a key is a simple name that needs no quotes."
+' A simple name starts with a letter, "_" or "$", followed by letters, digits,
+' "_" or "$", as in JavaScript and JSON5. Like compares binary in this class.
 
-    ' Lookup table for character encoding.
-    Static Table(0 To 127) As Byte
-    If Table(8) = 0 Then
-        Table(8) = 98         ' VBA.vbBack -> "\b"
-        Table(9) = 116        ' VBA.vbTab -> "\t"
-        Table(10) = 110       ' VBA.vbLf -> "\n"
-        Table(12) = 102       ' VBA.vbFormFeed -> "\f"
-        Table(13) = 114       ' VBA.vbCr -> "\r"
-        Table(34) = 34        ' """"  -> "\"""
-'       Table(47) = 47        ' "/" -> "\/" ' RFC 4627 permits but does not require escaping "/"
-        Table(92) = 92        ' "\" -> "\\"
+    IsSimpleKey = key Like "[A-Za-z_$]*" And Not key Like "?*[!A-Za-z0-9_$]*"
+
+End Function
+#End If
+
+
+#If Not jsonSerializeQuotedKeys Then
+Private Sub AppendUnquotedKey(ByRef builder As StringBuilder, ByRef key As String)
+Attribute AppendUnquotedKey.VB_Description = "Appends a key without quotes, or with quotes when it is not a simple name."
+' An empty key or a key with other characters is quoted anyway, so that the
+' json can be read back.
+
+    If IsSimpleKey(key) Then
+        Append builder, key
+    Else
+        Append builder, """" & Encode(key) & """"
     End If
 
-    ' The maximum buffer size when all characters would be \u encoded.
-    Dim Buffer As String: Buffer = Space$(6 * Len(str))
+End Sub
+#End If
+
+
+Private Sub InitializeEncodeTables()
+Attribute InitializeEncodeTables.VB_Description = "Fills the lookup tables for Encode."
+
+    ' The character after "\" for the characters with a short escape.
+    EncodeEscapes(8) = 98       ' VBA.vbBack -> "\b"
+    EncodeEscapes(9) = 116      ' VBA.vbTab -> "\t"
+    EncodeEscapes(10) = 110     ' VBA.vbLf -> "\n"
+    EncodeEscapes(12) = 102     ' VBA.vbFormFeed -> "\f"
+    EncodeEscapes(13) = 114     ' VBA.vbCr -> "\r"
+    EncodeEscapes(34) = 34      ' """"  -> "\"""
+' RFC 8259 allows "\/" but does not require escaping "/", see Encode.
+'   EncodeEscapes(47) = 47      ' "/" -> "\/"
+    EncodeEscapes(92) = 92      ' "\" -> "\\"
+
+    ' The character codes of the hexadecimal digits 0-9 and A-F.
+    Dim i As Long
+    For i = 0 To 15
+        HexDigits(i) = VBA.Asc(Mid$("0123456789ABCDEF", i + 1, 1))
+    Next
+
+End Sub
+
+
+Private Function Encode(ByRef str As String) As String
+Attribute Encode.VB_Description = "Encodes a Unicode/Ascii string to a printable Ascii string."
+' Encodes a Unicode/Ascii string to a printable Ascii string.
+'
+' Most strings need no encoding at all. The Like test below detects that in a
+' fraction of a microsecond and the string is returned as it is.
+'
+' The class has no Option Compare statement, so Like compares binary and the
+' ranges in the pattern are character codes: printable Ascii except """" (34)
+' and "\" (92). "]" (93) can't be in a character list; it takes the slow path,
+' which leaves it as it is. "/" is not escaped: RFC 8259 allows "\/" but does
+' not require it, so "/" is in the pattern (in the range #-[) and EncodeEscapes
+' (47) is not set. To write "\/", for example for json inside an HTML <script>
+' element, set EncodeEscapes(47) = 47 and also take "/" out of the pattern:
+' "*[! -!#-.0-[^-~]*". A "\" is always written as "\\", which is required.
+'
+' The slow path reads the characters from a byte array and writes the result
+' to a byte array, so no strings are created until the end. A VB string has 2
+' bytes a character; the result is printable Ascii, so only the low byte of a
+' character is written and the high byte stays 0.
+
+    ' Any character that might need encoding.
+    Const MightNeedEncoding As String = "*[! -!#-[^-~]*"
+    If Not str Like MightNeedEncoding Then
+        Encode = str
+        Exit Function
+    End If
+
+    ' VB allows a quick copy of a string into a byte array.
+    Dim Chars() As Byte: Chars = str
+    ' The maximum size when all characters would be \u encoded.
+    Dim Encoded() As Byte: ReDim Encoded(0 To 12 * Len(str) - 1)
     Dim index As Long
 
-    Dim Start As Long: Start = 1
-    Dim i As Long, Code As Long
-    For i = 1 To Len(str)
-        Code = VBA.AscW(Mid$(str, i, 1))
-        If Code < 0 Then
-            ' Extended Ascii and unicode characters.
-            ' AscW returns as a signed integer which needs to be converted to a unsigned number.
-            Mid$(Buffer, index + 1) = Mid$(str, Start, i - Start)
-            index = index + i - Start + 6
-            Mid$(Buffer, index - 5) = "\u"
-            Mid$(Buffer, index - 3) = Right$("0000" & Hex$(Code + 65536), 4)
-            Start = i + 1
-        ElseIf Code >= 127 Then
-            ' Extended Ascii and unicode characters.
-            Mid$(Buffer, index + 1) = Mid$(str, Start, i - Start)
-            index = index + i - Start + 6
-            Mid$(Buffer, index - 5) = "\u"
-            Mid$(Buffer, index - 3) = Right$("0000" & Hex$(Code), 4)
-            Start = i + 1
-        ElseIf Table(Code) <> 0 Then
+    Dim i As Long, Code As Long, Escaped As Long
+    For i = 0 To UBound(Chars) Step 2
+        ' The character code as an unsigned number (0 to 65535).
+        Code = Chars(i) Or Chars(i + 1) * &H100&
+        If Code < 127 Then
+            Escaped = EncodeEscapes(Code)
+        Else
+            Escaped = 0
+        End If
+        If Escaped <> 0 Then
             ' Special Ascii characters.
-            Mid$(Buffer, index + 1) = Mid$(str, Start, i - Start)
-            index = index + i - Start + 2
-            Mid$(Buffer, index - 1) = "\"
-            Mid$(Buffer, index) = Chr$(Table(Code))
-            Start = i + 1
-        ElseIf Code < 32 Then
-            ' Non-printable Ascii characters.
-            Mid$(Buffer, index + 1) = Mid$(str, Start, i - Start)
-            index = index + i - Start + 6
-            Mid$(Buffer, index - 5) = "\u"
-            Mid$(Buffer, index - 3) = Right$("0000" & Hex$(Code), 4)
-            Start = i + 1
+            Encoded(index) = 92                 ' "\"
+            Encoded(index + 2) = Escaped
+            index = index + 4
+        ElseIf Code < 32 Or Code >= 127 Then
+            ' Non-printable Ascii, extended Ascii and unicode characters.
+            Encoded(index) = 92                 ' "\"
+            Encoded(index + 2) = 117            ' "u"
+            Encoded(index + 4) = HexDigits(Code \ &H1000&)
+            Encoded(index + 6) = HexDigits((Code \ &H100&) And &HF&)
+            Encoded(index + 8) = HexDigits((Code \ &H10&) And &HF&)
+            Encoded(index + 10) = HexDigits(Code And &HF&)
+            index = index + 12
+        Else
+            ' Printable Ascii characters.
+            Encoded(index) = Code
+            index = index + 2
         End If
     Next
 
-    If Start = 1 Then
-        Encode = str
-    Else
-        ' Append the last buffered part of the string.
-        Mid$(Buffer, index + 1) = Mid$(str, Start)
-        index = index + Len(str) - Start + 1
-        Encode = Mid$(Buffer, 1, index)
-    End If
+    ReDim Preserve Encoded(0 To index - 1)
+    Encode = Encoded
 
 End Function
 
@@ -935,11 +1009,17 @@ Private Function Deserialize( _
     ByRef JSON As String, _
     ByRef index As Long _
 ) As Variant
+Attribute Deserialize.VB_Description = "Deserializes a json string to a VB data stucture."
 ' This main decision tree is called recursively in the deserialization process.
+'
+' value is a Variant, not a String: a filled String local costs about 0.65 µs
+' extra when the procedure exits, a Variant hardly anything. Deserialize is
+' called for every json-value.
 
     On Error GoTo ErrorHandler
 
-    Dim value As String
+    Dim value As Variant
+    If Mid$(JSON, index, 1) <= " " Then index = SkipWhitespace(JSON, index)
     Select Case Mid$(JSON, index, 1)
     Case """"
         ' MatchString advances the index to the next string position.
@@ -972,10 +1052,11 @@ Private Function Deserialize( _
 #End If
 #End If
     Case "{"
-        If Mid$(JSON, index + 1, 1) = "}" Then
+        Dim Ahead As Long: Ahead = SkipWhitespace(JSON, index + 1)
+        If Mid$(JSON, Ahead, 1) = "}" Then
             ' Deserialize empty json-object to an empty VB Dictionary.
             Set Deserialize = New Dictionary
-            index = index + 2
+            index = Ahead + 1
         Else
             ' Deserialize json-object to VB Dictionary or VB Collection.
             Set Deserialize = DeserializeDictionary(JSON, index)
@@ -983,18 +1064,20 @@ Private Function Deserialize( _
     Case "["
         ' Count the number of consecutive '[' characters at the Index position.
         Dim NDim As Long
-        Do While Mid$(JSON, index + NDim, 1) = "["
+        Ahead = index
+        Do While Mid$(JSON, Ahead, 1) = "["
             NDim = NDim + 1
+            Ahead = SkipWhitespace(JSON, Ahead + 1)
         Loop
         ' If the inner dimension is an empty array it counts as an element.
-        If Mid$(JSON, index + NDim, 1) = "]" Then
+        If Mid$(JSON, Ahead, 1) = "]" Then
             NDim = NDim - 1
         End If
         Select Case NDim
         Case 0
             ' Deserialize empty json-array to an empty VB Variant() array.
             Deserialize = VBA.Array()
-            index = index + 2
+            index = Ahead + 1
         Case 1
             ' Deserialize json-array to a VB Variant() array.
             Deserialize = DeserializeArray(JSON, index)
@@ -1009,7 +1092,7 @@ Private Function Deserialize( _
             ' Value is not recognized as a valid json-number.
             index = index - Len(value) ' Roll-back.
             RaiseParseError jsErrorInvalidNumber, JSON, index, value
-        ElseIf VBA.InStr(value, "e") <> 0 Or VBA.InStr(value, "E") <> 0 Then
+        ElseIf InStr(value, "e") <> 0 Or InStr(value, "E") <> 0 Then
             ' Convert json-number with exponent to a VB Double.
             Deserialize = VBA.Val(value)
 #If jsonConvertExcelLargeNumber Then
@@ -1021,13 +1104,14 @@ Private Function Deserialize( _
                 Deserialize = VBA.Replace(value, ".", ",", 1, 1)
             End If
 #End If
-        ElseIf VBA.InStr(value, ".") = 0 Then
+        ElseIf InStr(value, ".") = 0 Then
             On Error Resume Next
             ' Convert json-number to a VB Long.
             Deserialize = VBA.CLng(value)
             If Err.Number = 0 Then Exit Function
 #If Win64 Then
-            ' Convert json-number to a VB LongLong.
+            ' Convert json-number to a VB LongLong; clear the overflow of CLng first.
+            Err.Clear
             Deserialize = VBA.CLngLng(value)
             If Err.Number = 0 Then Exit Function
 #End If
@@ -1078,6 +1162,7 @@ Private Function DeserializeDictionary( _
     ByRef JSON As String, _
     ByRef index As Long _
 ) As Variant
+Attribute DeserializeDictionary.VB_Description = "Deserializes a json-object to a VB Dictionary."
 ' Json doesn't require a unique set of keys and allows multiple keys to be empty
 ' strings. A VB Dictionary doesn't allow duplicate keys, but one can be an empty
 ' string. If duplicate empty keys are detected, an attempt will be made to parse
@@ -1090,17 +1175,20 @@ Private Function DeserializeDictionary( _
     Dim i As Long, key As String
     For i = index + 1 To Len(JSON)
         ' Expect key.
+        If Mid$(JSON, i, 1) <= " " Then i = SkipWhitespace(JSON, i)
         If Mid$(JSON, i, 1) = """" Then
             key = MatchString(JSON, i)
         Else
 #If jsonDeserializeUnquotedKeys Then
             key = MatchValue(JSON, i)
+            If Not IsSimpleKey(key) Then RaiseParseError jsErrorStringExpected, JSON, i - Len(key), key
 #Else
             RaiseParseError jsErrorStringExpected, JSON, i
 #End If
         End If
 
         ' Expect name separator ":".
+        If Mid$(JSON, i, 1) <= " " Then i = SkipWhitespace(JSON, i)
         If Mid$(JSON, i, 1) = ":" Then
             i = i + 1
         Else
@@ -1111,6 +1199,7 @@ Private Function DeserializeDictionary( _
         Items.Add key, Deserialize(JSON, i)
 
         ' Expect a value separator "," or object-end "}".
+        If Mid$(JSON, i, 1) <= " " Then i = SkipWhitespace(JSON, i)
         Select Case Mid$(JSON, i, 1)
         Case "}"
             Exit For
@@ -1120,6 +1209,8 @@ Private Function DeserializeDictionary( _
             RaiseParseError jsErrorValueSeparatorExpected, JSON, i
         End Select
     Next
+    ' The loop also ends after a "," at the end of the json.
+    If Mid$(JSON, i, 1) <> "}" Then RaiseParseError jsErrorOpenObject, JSON, i
     Set DeserializeDictionary = Items
     index = i + 1
     Exit Function
@@ -1138,6 +1229,7 @@ Private Function DeserializeCollection( _
     ByRef JSON As String, _
     ByRef index As Long _
 ) As Variant
+Attribute DeserializeCollection.VB_Description = "Deserializes a json-object to a VB Collection."
 ' Json doesn't require a unique set of keys and allows multiple keys to be empty
 ' strings. A VB Collection doesn't allow duplicate keys, but keys can be omitted
 ' as left as empty strings. If duplicate keys are detected the parsing fails.
@@ -1149,17 +1241,20 @@ Private Function DeserializeCollection( _
     Dim i As Long, key As String
     For i = index + 1 To Len(JSON)
         ' Expect key.
+        If Mid$(JSON, i, 1) <= " " Then i = SkipWhitespace(JSON, i)
         If Mid$(JSON, i, 1) = """" Then
             key = MatchString(JSON, i)
         Else
 #If jsonDeserializeUnquotedKeys Then
             key = MatchValue(JSON, i)
+            If Not IsSimpleKey(key) Then RaiseParseError jsErrorStringExpected, JSON, i - Len(key), key
 #Else
             RaiseParseError jsErrorStringExpected, JSON, i
 #End If
         End If
 
         ' Expect name separator ":".
+        If Mid$(JSON, i, 1) <= " " Then i = SkipWhitespace(JSON, i)
         If Mid$(JSON, i, 1) = ":" Then
             i = i + 1
         Else
@@ -1174,6 +1269,7 @@ Private Function DeserializeCollection( _
         End If
 
         ' Expect value separator "," or object-end "}".
+        If Mid$(JSON, i, 1) <= " " Then i = SkipWhitespace(JSON, i)
         Select Case Mid$(JSON, i, 1)
         Case "}"
             Exit For
@@ -1183,6 +1279,8 @@ Private Function DeserializeCollection( _
             RaiseParseError jsErrorValueSeparatorExpected, JSON, i
         End Select
     Next
+    ' The loop also ends after a "," at the end of the json.
+    If Mid$(JSON, i, 1) <> "}" Then RaiseParseError jsErrorOpenObject, JSON, i
     Set DeserializeCollection = Items
     index = i + 1
     Exit Function
@@ -1201,6 +1299,7 @@ Private Function DeserializeArray( _
     ByRef JSON As String, _
     ByRef index As Long _
 ) As Variant
+Attribute DeserializeArray.VB_Description = "Deserializes a json-array to a VB Array."
 
     On Error GoTo ErrorHandler
 
@@ -1216,6 +1315,7 @@ Private Function DeserializeArray( _
         End If
 
         ' Add the parsed value to the next array element.
+        If Mid$(JSON, i, 1) <= " " Then i = SkipWhitespace(JSON, i)
         Select Case Mid$(JSON, i, 1)
         Case "{"
             Set Items(Last) = Deserialize(JSON, i)
@@ -1224,6 +1324,7 @@ Private Function DeserializeArray( _
         End Select
 
         ' Expect a value separator "," or array-end "]".
+        If Mid$(JSON, i, 1) <= " " Then i = SkipWhitespace(JSON, i)
         Select Case Mid$(JSON, i, 1)
         Case "]"
             Exit For
@@ -1234,6 +1335,8 @@ Private Function DeserializeArray( _
         End Select
         Last = Last + 1
     Next
+    ' The loop also ends after a "," at the end of the json, or for "[" alone.
+    If Mid$(JSON, i, 1) <> "]" Then RaiseParseError jsErrorOpenArray, JSON, i
 
     ' Resize array buffer to actual size and return.
     ReDim Preserve Items(0 To Last)
@@ -1252,6 +1355,7 @@ Private Function DeserializeMatrix( _
     ByRef index As Long, _
     ByVal NDim As Long _
 ) As Variant
+Attribute DeserializeMatrix.VB_Description = "Deserializes a n-dimensional json-array to a VB Array."
 ' The parsing of a n-dimensional json-array requires quite a bit of work. The
 ' array dimensions need to be established whilst the json-array may also contain
 ' syntax errors or perhaps a particular dimension is in fact a jagged array. The
@@ -1271,12 +1375,15 @@ Private Function DeserializeMatrix( _
     ' A stack is used to match the "[" and "]" structural characters.
     Dim Stack() As Long
 
-    ' Lengths stores all arrays lengths at a certain depth.
-    Dim Lengths() As Variant
+    ' Lengths stores all arrays lengths at a certain depth. Typed As Dictionary:
+    ' late-bound calls on a Dictionary in a Variant cost about 1 ms per matrix.
+    Dim Lengths() As Dictionary
 
-    Dim Last As Long
+    Dim Last As Long, Depth As Long, Mixed As Boolean, Again As Boolean
     Do
         Last = 0 ' Important to set to 0 for jagged arrays!
+        Depth = 0
+        Mixed = False
 
         ReDim Stack(1 To NDim)
 
@@ -1288,20 +1395,29 @@ Private Function DeserializeMatrix( _
         Next
 
         ' The recursion depth is limited by NDim for handling jagged arrays.
-        Dim Depth As Long
         Dim i As Long
         For i = index To Len(JSON)
             ' Parse any "[" structural characters.
+            If Mid$(JSON, i, 1) <= " " Then i = SkipWhitespace(JSON, i)
             Do While Mid$(JSON, i, 1) = "[" And Depth < NDim
-                If Mid$(JSON, i + 1, 1) = "]" Then
+                If Mid$(JSON, SkipWhitespace(JSON, i + 1), 1) = "]" Then
                     Exit Do
                 End If
                 Depth = Depth + 1
                 Stack(Depth) = i
                 ' Start counting the elements in this sub-array.
                 Lengths(Depth).Add i, 1
-                i = i + 1
+                i = SkipWhitespace(JSON, i + 1)
             Loop
+
+            ' A value (or an empty json-array) above the deepest level, as in [[1,2],3]:
+            ' the json-array is an array of arrays and values. Parse it again with the
+            ' dimensions down to this level; Deserialize parses the deeper arrays.
+            If Depth < NDim Then
+                NDim = Depth
+                Mixed = True
+                Exit For
+            End If
 
             ' Check the array length and extend it if necessary.
             If Last > UBound(Items) Then
@@ -1318,12 +1434,14 @@ Private Function DeserializeMatrix( _
             End Select
 
             ' Parse any "]" structural characters.
+            If Mid$(JSON, i, 1) <= " " Then i = SkipWhitespace(JSON, i)
             Do While Mid$(JSON, i, 1) = "]"
                 Depth = Depth - 1
                 i = i + 1
                 If Depth = 0 Then
                     Exit For
                 End If
+                If Mid$(JSON, i, 1) <= " " Then i = SkipWhitespace(JSON, i)
             Loop
 
             ' Expect a value separator ",".
@@ -1339,7 +1457,16 @@ Private Function DeserializeMatrix( _
             End Select
             Last = Last + 1
         Next
-    Loop While IsJaggedArray(Lengths, NDim)
+        ' The loop also ends after a "," at the end of the json.
+        If Depth <> 0 And Not Mixed Then RaiseParseError jsErrorOpenArray, JSON, i
+
+        ' Parse again for a mixed or a jagged json-array (IsJaggedArray lowers NDim).
+        If Mixed Then
+            Again = True
+        Else
+            Again = IsJaggedArray(Lengths, NDim)
+        End If
+    Loop While Again
 
     ' Resize array buffer to actual size.
     ReDim Preserve Items(0 To Last)
@@ -1360,7 +1487,8 @@ ErrorHandler:
 End Function
 
 
-Private Function IsJaggedArray(ByRef Lengths() As Variant, ByRef NDim As Long) As Boolean
+Private Function IsJaggedArray(ByRef Lengths() As Dictionary, ByRef NDim As Long) As Boolean
+Attribute IsJaggedArray.VB_Description = "Determines whether the n-dimensional json-array is jagged or not."
 ' For an array all array lengths at a certain depth need to be identical.
 
     Dim Length As Long, value As Variant
@@ -1383,9 +1511,10 @@ End Function
 
 Private Function RedimensionArray( _
     ByRef Items() As Variant, _
-    ByRef Lengths() As Variant, _
+    ByRef Lengths() As Dictionary, _
     ByVal NDim As Long _
 ) As Variant()
+Attribute RedimensionArray.VB_Description = "Redimensions an one-dimensional array to a multi-dimensional array."
 ' The redimensioning is accomplished by swapping SafeArray data pointers.
 
     ' Create a n-dimensional SafeArray with the proper dimensions and boundaries.
@@ -1403,11 +1532,13 @@ Private Function RedimensionArray( _
     Dim psa As LongPtr: psa = SafeArrayCreate(VBA.vbVariant, NDim, ByVal VarPtr(rgsabound(0)))
     If psa = 0 Then Err.Raise vbErrorOutOfMemory
 
+    Dim Matrix() As Variant, DataPtr As LongPtr
+#If API Then
     ' Assign the created n-dimensional SafeArray to the Matrix variable.
-    Dim Matrix() As Variant: CopyMemory ByVal VarPtrArray(Matrix), psa, vbSizeLongPtr
+    CopyMemory ByVal VarPtrArray(Matrix), psa, vbSizeLongPtr
 
     ' Save the array data pointer for the Matrix array.
-    Dim DataPtr As LongPtr: CopyMemory DataPtr, ByVal psa + vbOffsetArraypvData, vbSizeLongPtr
+    CopyMemory DataPtr, ByVal psa + vbOffsetArraypvData, vbSizeLongPtr
 
     ' Copy the array data pointer for the Items array to the Matrix SafeArray.
     CopyMemory ByVal psa + vbOffsetArraypvData, VarPtr(Items(0)), vbSizeLongPtr
@@ -1417,6 +1548,14 @@ Private Function RedimensionArray( _
 
     ' Copy the array data pointer for the Matrix array to the Items SafeArray.
     CopyMemory ByVal psa + vbOffsetArraypvData, DataPtr, vbSizeLongPtr
+#Else
+    ' The same pointer copies with the Variant ByRef construct instead of the API.
+    CopyPtrByRef VarPtrArray(Matrix), psa, VarByRef.vt, VarByRef.ref
+    DataPtr = PeekPtrByRef(psa + vbOffsetArraypvData, VarByRef.vt, VarByRef.ref)
+    CopyPtrByRef psa + vbOffsetArraypvData, VarPtr(Items(0)), VarByRef.vt, VarByRef.ref
+    psa = PeekPtrByRef(VarPtrArray(Items), VarByRef.vt, VarByRef.ref)
+    CopyPtrByRef psa + vbOffsetArraypvData, DataPtr, VarByRef.vt, VarByRef.ref
+#End If
 
     ' Return the n-dimensional Matrix.
     RedimensionArray = Matrix
@@ -1424,97 +1563,174 @@ Private Function RedimensionArray( _
 End Function
 
 
+Private Sub InitializeDecodeTables()
+Attribute InitializeDecodeTables.VB_Description = "Fills the lookup tables for Decode."
+
+    ' The character for the character after "\" of a short escape.
+    DecodeEscapes(34) = 34      ' "\"""  -> """"
+    DecodeEscapes(47) = 47      ' "\/" -> "/"
+    DecodeEscapes(92) = 92      ' "\\" -> "\"
+    DecodeEscapes(98) = 8       ' "\b" -> VBA.vbBack
+    DecodeEscapes(102) = 12     ' "\f" -> VBA.vbFormFeed
+    DecodeEscapes(110) = 10     ' "\n" -> VBA.vbLf
+    DecodeEscapes(114) = 13     ' "\r" -> VBA.vbCr
+    DecodeEscapes(116) = 9      ' "\t" -> VBA.vbTab
+
+    ' The value of the hexadecimal digits 0-9, A-F and a-f; 255 for the others.
+    Dim i As Long
+    For i = 0 To 127
+        HexValues(i) = 255
+    Next
+    For i = 0 To 9
+        HexValues(48 + i) = i
+    Next
+    For i = 10 To 15
+        HexValues(55 + i) = i       ' "A" to "F"
+        HexValues(87 + i) = i       ' "a" to "f"
+    Next
+
+End Sub
+
+
 Private Function Decode(ByRef JSON As String) As String
+Attribute Decode.VB_Description = "Decodes a printable Ascii string to a Unicode string."
+' Decodes the escapes of a json-string.
+'
+' A string without a "\" is returned as it is. Otherwise InStr jumps from "\" to
+' "\" and every run of characters in between is copied to the buffer at once;
+' the result is never longer than the json-string. The escapes are decoded with
+' lookup tables, reading the characters from a byte array (2 bytes a character).
+' An invalid escape raises a parse error: an unknown character after "\", a "\"
+' at the end, or a "\u" without 4 hexadecimal digits. Both "\/" and "/" decode
+' to "/". A json-string with "\/" therefore keeps its value, but Encode writes
+' it back as "/", the shortest form that is allowed.
 
-    ' Lookup table for character decoding.
-    Static Table(0 To 127) As Byte
-    If Table(34) = 0 Then
-        Table(34) = 34        ' """"
-        Table(47) = 47        ' "\/" -> "/"
-        Table(92) = 92        ' "\"
-        Table(98) = 8         ' "b"
-        Table(102) = 12       ' "f"
-        Table(110) = 10       ' "n"
-        Table(114) = 13       ' "r"
-        Table(116) = 9        ' "t"
-    End If
-
-    Dim Buffer As StringBuilder
-    Dim Start As Long: Start = 1
-    Dim i As Long, Code As Long
-    Do
-        ' Find next escaped character or unicode.
-        i = VBA.InStr(Start, JSON, "\")
-        If i = 0 Then Exit Do
-        ' Append the buffered string.
-        Append Buffer, Mid$(JSON, Start, i - Start)
-        Code = VBA.Asc(Mid$(JSON, i + 1, 1))
-        If Code = 117 Then ' "u"
-            Append Buffer, ChrW$("&H" & Mid$(JSON, i + 2, 4))
-            i = i + 4
-        ElseIf Table(Code) <> 0 Then
-            Append Buffer, Chr$(Table(Code))
-        Else
-            RaiseParseError jsErrorInvalidCharacter, JSON, i + 1
-        End If
-        Start = i + 2
-    Loop
-
-    If Start = 1 Then
-        ' Just append the whole string as all characters were uncoded.
+    Dim i As Long: i = InStr(JSON, "\")
+    If i = 0 Then
         Decode = JSON
-    Else
-        ' Append the last buffered part of the string and flush the buffer.
-        Append Buffer, Mid$(JSON, Start)
-        Decode = Flush(Buffer)
+        Exit Function
     End If
+
+    ' VB allows a quick copy of a string into a byte array.
+    Dim Chars() As Byte: Chars = JSON
+    ' The result is never longer than the json-string.
+    Dim Buffer As String: Buffer = space$(Len(JSON))
+    Dim index As Long
+
+    Dim Start As Long: Start = 1
+    Dim j As Long, Code As Long, Digit As Long
+    Do
+        ' Copy the run of characters before the "\".
+        If i > Start Then
+            Mid$(Buffer, index + 1) = Mid$(JSON, Start, i - Start)
+            index = index + i - Start
+        End If
+        If i = Len(JSON) Then RaiseParseError jsErrorInvalidCharacter, JSON, i, "\"
+        ' The character after the "\" starts at byte 2 * i.
+        Code = Chars(2 * i) Or Chars(2 * i + 1) * &H100&
+        If Code = 117 Then
+            ' "\u" and 4 hexadecimal digits.
+            If i + 5 > Len(JSON) Then RaiseParseError jsErrorInvalidCharacter, JSON, i, Mid$(JSON, i)
+            Code = 0
+            For j = 2 * i + 2 To 2 * i + 8 Step 2
+                If Chars(j + 1) = 0 And Chars(j) < 128 Then Digit = HexValues(Chars(j)) Else Digit = 255
+                If Digit = 255 Then RaiseParseError jsErrorInvalidCharacter, JSON, j \ 2 + 1, Mid$(JSON, i, 6)
+                Code = Code * 16 + Digit
+            Next
+            Start = i + 6
+        Else
+            ' A short escape like "\n".
+            If Code < 128 Then Code = DecodeEscapes(Code) Else Code = 0
+            If Code = 0 Then RaiseParseError jsErrorInvalidCharacter, JSON, i + 1, Mid$(JSON, i, 2)
+            Start = i + 2
+        End If
+        index = index + 1
+        Mid$(Buffer, index) = VBA.ChrW$(Code)
+        i = InStr(Start, JSON, "\")
+    Loop Until i = 0
+
+    ' Copy the last run of characters, if any.
+    If Start <= Len(JSON) Then
+        Mid$(Buffer, index + 1) = Mid$(JSON, Start)
+        index = index + Len(JSON) - Start + 1
+    End If
+    Decode = Left$(Buffer, index)
 
 End Function
 
 
 Private Function MatchString(ByRef JSON As String, ByRef index As Long) As String
+Attribute MatchString.VB_Description = "Matches a string at the current position and advances the index."
 ' Mid$(json, Index, 1) = """"
+'
+' InStr jumps from """" to """"; a """" is escaped when an odd number of "\"
+' precedes it. Only the characters just before a """" are looked at.
+'
+' InStr, not VBA.InStr: the qualified VBA.InStr copies the whole string on
+' every call (330 µs for a json of 1 MB), the unqualified InStr does not.
 
-    ' Finding the next unescaped """" marks the end of the string.
-    Dim i As Long
-    For i = index + 1 To Len(JSON)
-        Select Case Mid$(JSON, i, 1)
-        Case """"
-            MatchString = Decode(Mid$(JSON, index + 1, i - index - 1))
-            index = i + 1
-            Exit Function
-        Case "\" ' Escape
-            i = i + 1
+    Dim i As Long: i = index
+    Do
+        ' Find the next """".
+        i = InStr(i + 1, JSON, """")
+        If i = 0 Then
+            ' The end of the json is reached without finding a closing structural character.
+            RaiseParseError jsErrorOpenString, JSON, index
+        End If
+        ' Count the "\" just before it.
+        Dim j As Long: j = i - 1
+        Do While j > index
+            If Mid$(JSON, j, 1) <> "\" Then Exit Do
+            j = j - 1
+        Loop
+    Loop While (i - 1 - j) Mod 2 = 1
+
+    MatchString = Decode(Mid$(JSON, index + 1, i - index - 1))
+    index = i + 1
+
+End Function
+
+
+Private Function SkipWhitespace(ByRef JSON As String, ByVal index As Long) As Long
+Attribute SkipWhitespace.VB_Description = "Returns the position of the first character at or after a position that is not whitespace."
+' Json whitespace is a space, tab, line feed or carriage return. Beyond the end
+' of the json the position is returned as it is. The callers first test
+' Mid$(JSON, index, 1) <= " ", so the call is only made for a character that
+' might be whitespace.
+
+    Do While index <= Len(JSON)
+        Select Case VBA.AscW(Mid$(JSON, index, 1))
+        Case 32, 9, 10, 13
+            index = index + 1
+        Case Else
+            Exit Do
         End Select
-    Next
-
-    ' The end of the json is reached without finding a closing structural character.
-    RaiseParseError jsErrorOpenString, JSON, index
+    Loop
+    SkipWhitespace = index
 
 End Function
 
 
 Private Function MatchValue(ByRef JSON As String, ByRef index As Long) As String
+Attribute MatchValue.VB_Description = "Matches a value at the current position and advances the index."
 
-    Const StructuralCharacters As String = "{}[],:"
-
-    ' Finding a structural character marks the end of the value.
+    ' A structural character "{}[],:", whitespace or the end of the json marks the
+    ' end of the value.
     Dim i As Long
     For i = index To Len(JSON)
-        If VBA.InStr(StructuralCharacters, Mid$(JSON, i, 1)) <> 0 Then
-            MatchValue = Mid$(JSON, index, i - index)
-            index = i
-            Exit Function
-        End If
+        Select Case VBA.AscW(Mid$(JSON, i, 1))
+        Case 123, 125, 91, 93, 44, 58, 32, 9, 10, 13
+            Exit For
+        End Select
     Next
-
-    ' The end of the json is reached without finding the closing structural character.
-    RaiseParseError jsErrorOpenValue, JSON, index
+    MatchValue = Mid$(JSON, index, i - index)
+    index = i
 
 End Function
 
 
 Private Function IsExcelLargeNumberString(ByRef var As Variant) As Boolean
+Attribute IsExcelLargeNumberString.VB_Description = "Determines whether a string is a large Excel number or not."
 ' When you type a number that contains more than 15 digits in a cell in Excel,
 ' any digits past the 15th place are changed to zeros. In order to prevent data
 ' loss, a large number with more than 15 digits is conserved as a string.
@@ -1574,6 +1790,7 @@ Private Sub RaiseParseError( _
     ByVal index As Long, _
     Optional ByVal Info As String _
 )
+Attribute RaiseParseError.VB_Description = "Raises an error and prints information about the parse error."
 
     ' The width of the printed line.
     Const Width As Long = 80
@@ -1590,7 +1807,7 @@ Private Sub RaiseParseError( _
 
     ' Create an locator string to indicate the problem character.
     Dim Length As Long: Length = VBA.IIf(index > Len(JSON), index, Len(JSON))
-    Dim locator As String: locator = Space$(Length)
+    Dim locator As String: locator = space$(Length)
     Mid$(locator, index, 1) = "^"
 
     ' Align information string with json over multiple lines if necessary.
@@ -1608,9 +1825,31 @@ Private Sub RaiseParseError( _
 End Sub
 
 
+Private Sub DataError( _
+    ByRef builder As StringBuilder, _
+    ByVal error As JSONERROR, _
+    Optional ByVal Info As String _
+)
+Attribute DataError.VB_Description = "Raises an error for VB data that can't be serialized, or puts the message in the json."
+' The information, e.g. the VB type name, is added to the description. See the
+' directive jsonRaiseDataErrors.
+
+    Dim Message As String: Message = ErrorDescription(error)
+    If Len(Info) <> 0 Then Message = Left$(Message, Len(Message) - 1) & " (" & Info & ")."
+#If jsonRaiseDataErrors Then
+    Err.Raise VBA.vbObjectError Or error, Description:=Message
+#Else
+    Append builder, Message
+    Debug.Print Message
+#End If
+
+End Sub
+
+
 Private Function ErrorDescription( _
     ByVal error As JSONERROR _
 ) As String
+Attribute ErrorDescription.VB_Description = "Returns the description for an error."
 
     Select Case error
     Case jsErrorInvalidData
@@ -1645,6 +1884,8 @@ Private Function ErrorDescription( _
         ErrorDescription = "Invalid json: invalid character."
     Case jsErrorExtraCharacter
         ErrorDescription = "Invalid json: extra character(s)."
+    Case jsErrorEmptyDimension
+        ErrorDescription = "Invalid data: array with an empty dimension."
     End Select
 
 End Function
@@ -1659,16 +1900,23 @@ End Function
 ' string allocations which may happen during the serialization process.
 
 Private Sub Append(ByRef builder As StringBuilder, ByRef str As String)
+Attribute Append.VB_Description = "Appends a string to the buffered string."
 ' The choice was made to grow the buffer exponentially rather than linearly.
+' Besides the headspace, 2 characters are always left free: for the closing
+' """" of a string or a date and the structural character after it, so that
+' Serialize needs no Adjust for every string.
+
+    ' The characters always left free after the appended string.
+    Const Spare As Long = 2
 
     ' Check the size of the buffer and extend it if necessary.
-    Do While Len(builder.Buffer) <= (builder.Count + builder.HeadSpace + Len(str))
+    Do While Len(builder.Buffer) <= (builder.Count + builder.HeadSpace + Len(str) + Spare)
         If Len(builder.Buffer) = 0 Then
             Const InitialSize As Long = 1024
-            builder.Buffer = Space$(InitialSize)
+            builder.Buffer = space$(InitialSize)
         Else
             Const GrowthFactor As Double = 2
-            builder.Buffer = builder.Buffer & Space$((GrowthFactor - 1) * Len(builder.Buffer))
+            builder.Buffer = builder.Buffer & space$((GrowthFactor - 1) * Len(builder.Buffer))
         End If
     Loop
 
@@ -1680,6 +1928,7 @@ End Sub
 
 
 Private Sub Adjust(ByRef builder As StringBuilder, ByVal amount As Long)
+Attribute Adjust.VB_Description = "Adjust the head space of the buffered string."
 
     builder.HeadSpace = builder.HeadSpace + amount
 
@@ -1693,6 +1942,7 @@ End Sub
 
 
 Private Sub Shorten(ByRef builder As StringBuilder, Optional ByVal amount As Long = 1)
+Attribute Shorten.VB_Description = "Shortens the buffered string by an amount of characters."
 
     If amount < builder.Count Then
         builder.Count = builder.Count - amount
@@ -1704,6 +1954,7 @@ End Sub
 
 
 Private Function Flush(ByRef builder As StringBuilder) As String
+Attribute Flush.VB_Description = "Flushes the buffered string."
 ' The string buffer keeps its current size.
 
     Flush = Left$(builder.Buffer, builder.Count)
@@ -1718,6 +1969,7 @@ End Function
 ''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 
 Private Function ConvertLocalTimeToGMT(Optional ByVal LocalTime As Variant) As Date
+Attribute ConvertLocalTimeToGMT.VB_Description = "Converts a local time to the corresponding GMT."
 
     Dim TZInfo As TimeZoneInformation, TZStatus As TIMEZONESTATUS
     TZStatus = GetTimeZoneInformation(TZInfo)
@@ -1750,6 +2002,7 @@ End Function
 
 
 Private Function ConvertGMTToLocalTime(ByVal GMT As Date) As Date
+Attribute ConvertGMTToLocalTime.VB_Description = "Converts a GMT to the corresponding local time."
 
     Dim TZInfo As TimeZoneInformation, TZStatus As TIMEZONESTATUS
     TZStatus = GetTimeZoneInformation(TZInfo)
@@ -1774,6 +2027,7 @@ Private Function ConvertLocalTimeToUTC( _
     ByVal LocalTime As Variant, _
     Optional ByVal Delimiter As Boolean = True _
 ) As String
+Attribute ConvertLocalTimeToUTC.VB_Description = "Converts a local serial time to the corresponding UTC."
 ' For formats see https://en.wikipedia.org/wiki/ISO_8601
 
     Dim ISOFormat As String
@@ -1797,6 +2051,7 @@ End Function
 
 
 Private Function ConvertUTCToLocalTime(ByVal UTC As String) As Date
+Attribute ConvertUTCToLocalTime.VB_Description = "Converts a UTC to the corresponding local serial time."
 ' For formats see https://en.wikipedia.org/wiki/ISO_8601
 
     Dim LocalTime As Date
@@ -1823,6 +2078,7 @@ End Function
 
 
 Private Function ConvertSystemTimeToSerialTime(ByRef SystemTime As SystemTime) As Date
+Attribute ConvertSystemTimeToSerialTime.VB_Description = "Converts a system time to the corresponding serial time."
 ' Serial time is the time as implemented with the VB Date type.
 
     With SystemTime
@@ -1835,6 +2091,7 @@ End Function
 
 
 Private Function ConvertDateToSystemTime(ByVal serialTime As Date) As SystemTime
+Attribute ConvertDateToSystemTime.VB_Description = "Converts a serial time to the corresponding system time."
 
     With ConvertDateToSystemTime
         .Year = VBA.Year(serialTime)
@@ -1852,6 +2109,7 @@ End Function
 
 
 Private Function DST(ByVal serialDate As Date) As TIMEZONESTATUS
+Attribute DST.VB_Description = "Determines whether a date falls within the daylight saving period or not."
 
     Dim TZInfo As TimeZoneInformation
     If VBA.CLng(VBA.Int(serialDate)) = 0 Then
@@ -1891,6 +2149,7 @@ Private Function LastDayOfWeekOfMonth( _
     ByVal DayOfWeek As VbDayOfWeek, _
     ByVal serialTime As Date _
 ) As Date
+Attribute LastDayOfWeekOfMonth.VB_Description = "Returns the date of the last weekday in the month specified by a date."
 
     If DayOfWeek < 1 Or DayOfWeek > 7 Then Err.Raise vbErrorInvalidProcedureCall, , "Day is invalid"
 
@@ -1908,6 +2167,7 @@ End Function
 ''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 
 Private Function LocaleDecimalPoint() As Boolean
+Attribute LocaleDecimalPoint.VB_Description = "Determine the locale for the decimal point."
 
     ' Quick way to establish the locale for the decimal point without API.
     Select Case Mid$(VBA.CStr(1.1), 2, 1)
@@ -1926,8 +2186,9 @@ End Function
 
 
 Private Function ArrDims(ByRef arr As Variant) As Long
+Attribute ArrDims.VB_Description = "Returns the number of dimensions of an array."
 ' Returns 0 for an empty array.
-' LBound raises on out-of-range n â€” used as the loop exit condition.
+' LBound raises on out-of-range n — used as the loop exit condition.
 
     If Not VBA.IsArray(arr) Then Err.Raise vbErrorTypeMismatch
 
@@ -1972,6 +2233,7 @@ Private Function CollKeys(ByVal coll As Collection) As String()
 End Function
 #Else
 Private Sub InitializeVarByRef()
+Attribute InitializeVarByRef.VB_Description = "Initializes the Variant ByRef construct."
 
     VarByRef.vt = VarPtr(VarByRef.ref)
     CopyMemory VarByRef.vt, VBA.vbInteger Or VT_BYREF, vbSizeInteger
@@ -1979,7 +2241,50 @@ Private Sub InitializeVarByRef()
 End Sub
 
 
+Private Sub CopyPtrByRef( _
+    ByVal address As LongPtr, _
+    ByVal value As LongPtr, _
+    ByRef vt As Variant, _
+    ByRef ref As Variant _
+)
+Attribute CopyPtrByRef.VB_Description = "Copies a pointer to a memory address using the Variant ByRef construct."
+
+#If Win64 Then
+    ' A LongLong by reference is not supported (error 458). The 8 bytes of the
+    ' LongLong are read as a Currency by changing the type only, and that
+    ' Currency is written by reference: the bits are copied, nothing is calculated.
+    VarByRef.ref = value
+    vt = VBA.vbCurrency
+    Dim Bits As Currency: Bits = ref
+
+    VarByRef.ref = address
+    vt = VBA.vbCurrency Or VT_BYREF
+    ref = Bits
+#Else
+    VarByRef.ref = address
+    vt = VBA.vbLong Or VT_BYREF
+    ref = value
+#End If
+
+End Sub
+
+
+Private Function PeekPtrByRef( _
+    ByVal address As LongPtr, _
+    ByRef vt As Variant, _
+    ByRef ref As Variant _
+) As LongPtr
+Attribute PeekPtrByRef.VB_Description = "Returns the pointer at a memory address using the Variant ByRef construct."
+
+    VarByRef.ref = address
+    vt = vbLongPtr Or VT_BYREF
+    PeekPtrByRef = ref
+
+End Function
+
+
 Private Function CollKeys(ByVal coll As Collection, ByRef vt As Variant) As String()
+Attribute CollKeys.VB_Description = "Returns an array containing the keys of all the items in a VB Collection."
 ' Returns an empty string array for an empty Collection.
 
     If coll.Count = 0 Then Exit Function
