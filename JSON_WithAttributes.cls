@@ -410,7 +410,8 @@ Attribute Parse.VB_Description = "Deserializes a json string to a VB data struct
     Exit Function
 
 ErrorHandler:
-    ' Tidy up to prevent cascading errors: Nothing for a json-object, so that Set works.
+    ' Tidy up to prevent cascading errors: return Nothing for a json-object,
+    ' so that Set works when parsing a json-object.
     If IsJsonObject Then
         Set Parse = Nothing
     Else
@@ -922,7 +923,7 @@ Attribute InitializeEncodeTables.VB_Description = "Fills the lookup tables for E
     EncodeEscapes(12) = 102     ' VBA.vbFormFeed -> "\f"
     EncodeEscapes(13) = 114     ' VBA.vbCr -> "\r"
     EncodeEscapes(34) = 34      ' """"  -> "\"""
-' RFC 8259 allows "\/" but does not require escaping "/", see Encode.
+'   RFC 8259 allows "\/" but does not require escaping "/", see Encode.
 '   EncodeEscapes(47) = 47      ' "/" -> "\/"
     EncodeEscapes(92) = 92      ' "\" -> "\\"
 
